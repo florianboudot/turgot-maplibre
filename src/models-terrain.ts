@@ -66,6 +66,8 @@ async function modelsTerrain() {
     scene: THREE.Scene;
     raycaster: THREE.Raycaster;
     raycast: (point: { x: number; y: number }) => void;
+    loadedModels?: THREE.Object3D[];
+    transformControls?: TransformControls;
   }
 
   const customLayerWith3DModels: CustomLayerWith3DModels = {
@@ -74,7 +76,7 @@ async function modelsTerrain() {
     renderingMode: "3d",
 
     raycaster: new THREE.Raycaster(),
-    camera: new THREE.Camera(),
+    camera: new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 10000),
     scene: new THREE.Scene(),
 
     async onAdd(map, gl) {
@@ -92,9 +94,12 @@ async function modelsTerrain() {
       this.scene.add(light);
 
       // load and position models
-      const loadedModels = await Promise.all(modelsList.map(loadModel));
-      loadedModels.forEach((model) => this.scene?.add(model));
+      this.loadedModels = await Promise.all(modelsList.map(loadModel));
+      this.loadedModels.forEach((model) => this.scene?.add(model));
+      this.transformControls = new TransformControls(this.camera, map.getCanvas());
+      this.scene.add(this.transformControls.getHelper());
 
+      console.log("this.scene.children", this.scene.children);
       renderer.autoClear = false;
     },
 
@@ -113,7 +118,11 @@ async function modelsTerrain() {
 
       // calculate objects intersecting the picking ray
       var intersects = this.raycaster.intersectObjects(this.scene.children, true);
-      intersects.length && console.log("intersects", intersects);
+      if (intersects.length) {
+        const selectedObject = intersects[0].object;
+        console.log("selectedObject", selectedObject);
+        this.transformControls?.attach(selectedObject);
+      }
     },
 
     render(gl, args) {
@@ -138,6 +147,12 @@ async function modelsTerrain() {
         );
 
       this.camera.projectionMatrix = m.multiply(l);
+
+      if (this.transformControls) {
+        this.transformControls.camera.projectionMatrix.copy(this.camera.projectionMatrix);
+        this.transformControls.update();
+      }
+
       renderer?.resetState();
       renderer?.render(this.scene, this.camera);
       map.triggerRepaint();
