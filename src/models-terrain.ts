@@ -1,11 +1,32 @@
-import maplibregl, { AddLayerObject } from "maplibre-gl";
+import maplibregl from "maplibre-gl";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls";
 import { MAPTILER_KEY } from "src/constants";
 import { ModelDefinition, modelsList } from "src/models-list";
 import { calculateDistanceMercatorToMeters } from "src/utils/calculateDistanceMercatorToMeters";
 
-const sceneOrigin = new maplibregl.LngLat(2.3694596857951638, 48.88353262931881);
+const sceneOrigin = new maplibregl.LngLat(2.370572296723708, 48.884197153165246);
+
+const map = new maplibregl.Map({
+  container: "map",
+  center: sceneOrigin,
+  zoom: 17,
+  pitch: 45,
+  maxPitch: 80, // default 60
+  bearing: -17.6, // rotation
+  canvasContextAttributes: { antialias: true },
+  style: `https://api.maptiler.com/maps/voyager/style.json?key=${MAPTILER_KEY}`,
+});
+
+// orthographic view (the lower the better)
+// map.setVerticalFieldOfView(1.1);
+
+const renderer = new THREE.WebGLRenderer({
+  canvas: map.getCanvas(),
+  context: map.getCanvas().getContext("webgl2") as WebGLRenderingContext,
+  antialias: true,
+});
 
 async function loadModel(model: ModelDefinition) {
   const loader = new GLTFLoader();
@@ -29,17 +50,6 @@ async function loadModel(model: ModelDefinition) {
 }
 
 async function modelsTerrain() {
-  const map = new maplibregl.Map({
-    container: "map",
-    center: sceneOrigin,
-    zoom: 18,
-    pitch: 45,
-    maxPitch: 80, // default 60
-    bearing: -17.6, // rotation
-    canvasContextAttributes: { antialias: true },
-    style: `https://api.maptiler.com/maps/voyager/style.json?key=${MAPTILER_KEY}`,
-  });
-
   // Add zoom and rotation controls to the map.
   map.addControl(
     new maplibregl.NavigationControl({
@@ -54,14 +64,19 @@ async function modelsTerrain() {
   interface CustomLayerWith3DModels extends maplibregl.CustomLayerInterface {
     camera: THREE.Camera;
     scene: THREE.Scene;
-    renderer?: THREE.WebGLRenderer;
+    raycaster: THREE.Raycaster;
+    raycast: (point: { x: number; y: number }) => void;
+    loadedModels?: THREE.Object3D[];
+    transformControls?: TransformControls;
   }
 
   const customLayerWith3DModels: CustomLayerWith3DModels = {
     id: "3d-models",
     type: "custom",
     renderingMode: "3d",
-    camera: new THREE.Camera(),
+
+    raycaster: new THREE.Raycaster(),
+    camera: new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 10000),
     scene: new THREE.Scene(),
 
     async onAdd(map, gl) {
@@ -73,35 +88,45 @@ async function modelsTerrain() {
 
       // We now have a scene with (x=east, y=up, z=north)
 
+      // light coming from south-east.
       const light = new THREE.DirectionalLight(0xffffff);
-      // Making it just before noon - light coming from south-east.
       light.position.set(50, 70, -30).normalize();
       this.scene.add(light);
 
-      // Axes helper to show how threejs scene is oriented.
-      const axesHelper = new THREE.AxesHelper(60);
-      this.scene.add(axesHelper);
-
       // load and position models
-      const loadedModels = await Promise.all(modelsList.map(loadModel));
-      loadedModels.forEach((model) => this.scene?.add(model));
+      this.loadedModels = await Promise.all(modelsList.map(loadModel));
+      this.loadedModels.forEach((model) => this.scene?.add(model));
+      this.transformControls = new TransformControls(this.camera, map.getCanvas());
+      this.scene.add(this.transformControls.getHelper());
 
-      // Use the MapLibre GL JS map canvas for three.js.
-      this.renderer = new THREE.WebGLRenderer({
-        canvas: map.getCanvas(),
-        context: gl,
-        antialias: true,
-      });
+      console.log("this.scene.children", this.scene.children);
+      renderer.autoClear = false;
+    },
 
-      this.renderer.autoClear = false;
+    raycast({ x, y }) {
+      const { width, height } = map.transform;
+      const camInverseProjection = this.camera.projectionMatrix.clone().invert();
+      const cameraPosition = new THREE.Vector3().applyMatrix4(camInverseProjection);
+      const mousePosition = new THREE.Vector3(
+        (x / width) * 2 - 1,
+        1 - (y / height) * 2,
+        1
+      ).applyMatrix4(camInverseProjection);
+      const viewDirection = mousePosition.sub(cameraPosition).normalize();
+
+      this.raycaster.set(cameraPosition, viewDirection);
+
+      // calculate objects intersecting the picking ray
+      var intersects = this.raycaster.intersectObjects(this.scene.children, true);
+      if (intersects.length) {
+        const selectedObject = intersects[0].object;
+        console.log("selectedObject", selectedObject);
+        this.transformControls?.attach(selectedObject);
+      }
     },
 
     render(gl, args) {
-      const offsetFromCenterElevation = map.queryTerrainElevation(sceneOrigin) || 0;
-      const sceneOriginMercator = maplibregl.MercatorCoordinate.fromLngLat(
-        sceneOrigin,
-        offsetFromCenterElevation
-      );
+      const sceneOriginMercator = maplibregl.MercatorCoordinate.fromLngLat(sceneOrigin, 0);
 
       const sceneTransform = {
         translateX: sceneOriginMercator.x,
@@ -115,7 +140,6 @@ async function modelsTerrain() {
         .makeTranslation(
           sceneTransform.translateX,
           sceneTransform.translateY,
-
           sceneTransform.translateZ
         )
         .scale(
@@ -123,8 +147,14 @@ async function modelsTerrain() {
         );
 
       this.camera.projectionMatrix = m.multiply(l);
-      this.renderer?.resetState();
-      this.renderer?.render(this.scene, this.camera);
+
+      if (this.transformControls) {
+        this.transformControls.camera.projectionMatrix.copy(this.camera.projectionMatrix);
+        this.transformControls.update();
+      }
+
+      renderer?.resetState();
+      renderer?.render(this.scene, this.camera);
       map.triggerRepaint();
     },
   };
@@ -134,6 +164,10 @@ async function modelsTerrain() {
   });
 
   map.on("mousemove", (e) => {
+    // raycast
+    customLayerWith3DModels.raycast(e.point);
+
+    // show coordinates
     const coordinatesElement = document.getElementById("coordinates");
     if (coordinatesElement) {
       const cursorLatLng = JSON.stringify(e.lngLat.wrap());
