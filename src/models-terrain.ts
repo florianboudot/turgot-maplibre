@@ -19,8 +19,9 @@ const map = new maplibregl.Map({
   style: `https://api.maptiler.com/maps/voyager/style.json?key=${MAPTILER_KEY}`,
 });
 
+let transformControls: TransformControls | undefined = undefined;
 // orthographic view (the lower the better)
-map.setVerticalFieldOfView(1.1);
+// map.setVerticalFieldOfView(1.1);
 
 const renderer = new THREE.WebGLRenderer({
   canvas: map.getCanvas(),
@@ -87,18 +88,17 @@ async function modelsTerrain() {
     id: "3d-models",
     type: "custom",
     renderingMode: "3d",
-
     raycaster: new THREE.Raycaster(),
-    camera: new THREE.Camera(),
+    camera: new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, 10000),
     scene: new THREE.Scene(),
     loadedModels: [],
 
     async onAdd(map, gl) {
       // In threejs, y points up
-      this.scene.rotateX(Math.PI / 2);
+      // this.scene.rotateX(Math.PI / 2);
 
       // In threejs, z points toward the viewer - mirroring it such that z points along maplibre's north.
-      this.scene.scale.multiply(new THREE.Vector3(1, 1, -1));
+      // this.scene.scale.multiply(new THREE.Vector3(1, 1, -1));
 
       // We now have a scene with (x=east, y=up, z=north)
 
@@ -110,6 +110,22 @@ async function modelsTerrain() {
       // load and position models
       this.loadedModels = await Promise.all(modelsList.map(loadModel));
       this.loadedModels.forEach((model) => this.scene?.add(model));
+
+      // Transform controls
+      transformControls = new TransformControls(this.camera, map.getCanvas());
+      transformControls.addEventListener("change", () => {
+        renderer.render(this.scene, this.camera);
+      });
+      // map.dragPan.enable(false);
+
+      transformControls.addEventListener("dragging-changed", function (event) {
+        console.log("dragging-changed", event);
+      });
+      this.scene.add(transformControls.getHelper());
+
+      transformControls.addEventListener("objectChange", function () {
+        console.log("objectChange");
+      });
 
       renderer.autoClear = false;
     },
@@ -129,6 +145,7 @@ async function modelsTerrain() {
 
       // calculate objects intersecting the picking ray
       var intersects = this.raycaster.intersectObjects(this.loadedModels, true);
+
       if (intersects.length) {
         const intersectedObject = intersects[0].object as THREE.Mesh;
         const parent = getParentGroup(intersectedObject);
@@ -136,6 +153,7 @@ async function modelsTerrain() {
         // bigger
         parent.scale.set(1.2, 1.2, 1.2);
 
+        transformControls?.attach(intersectedObject);
         this.previousIntersectedObject = parent;
       } else if (this.previousIntersectedObject) {
         // Reset scale
@@ -166,6 +184,7 @@ async function modelsTerrain() {
         );
 
       this.camera.projectionMatrix = m.multiply(l);
+
       renderer?.resetState();
       renderer?.render(this.scene, this.camera);
       map.triggerRepaint();
@@ -192,6 +211,8 @@ async function modelsTerrain() {
     const cursorLatLng = e.lngLat.wrap();
     console.log("click", cursorLatLng);
     navigator.clipboard.writeText(JSON.stringify(cursorLatLng));
+
+    transformControls?.detach();
   });
 }
 
